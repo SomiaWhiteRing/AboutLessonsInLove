@@ -303,6 +303,56 @@ init 20 python:
 
         return "\n".join(lines)
 
+    def bb_strip_font_tags(text):
+        if not isinstance(text, str):
+            return text
+
+        return re.sub(r"\{/?font(?:=[^}]*)?\}", "", text)
+
+    def bb_font_line_language(line):
+        if not isinstance(line, str):
+            return None
+
+        font_match = re.search(r"\{font=([^}]*)\}", line)
+        if not font_match:
+            return None
+
+        font = font_match.group(1)
+        if font == BB_ORIGINAL_FONT:
+            return BB_MODE_ORIGINAL
+        if font == BB_TRANSLATED_FONT:
+            return BB_MODE_TRANSLATED
+        return None
+
+    def bb_split_history_pair_text(text):
+        if not isinstance(text, str) or "\n" not in text:
+            return (None, None)
+
+        raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        lines = [bb_strip_font_tags(line) for line in raw_lines]
+        if len(lines) < 2:
+            return (None, None)
+
+        first_language = bb_font_line_language(raw_lines[0])
+        second_language = bb_font_line_language(raw_lines[1])
+        first = lines[0]
+        second = "\n".join(lines[1:])
+
+        if first_language == BB_MODE_TRANSLATED and second_language == BB_MODE_ORIGINAL:
+            return (bb_substitute(first), bb_substitute(second))
+        if first_language == BB_MODE_ORIGINAL and second_language == BB_MODE_TRANSLATED:
+            return (bb_substitute(second), bb_substitute(first))
+
+        bb_build_string_maps()
+
+        if first in bb_original_to_translated or second in bb_translated_to_original:
+            return (bb_substitute(bb_original_to_translated.get(first, second)), bb_substitute(first))
+
+        if first in bb_translated_to_original or second in bb_original_to_translated:
+            return (bb_substitute(first), bb_substitute(bb_original_to_translated.get(second, second)))
+
+        return (bb_substitute(first), bb_substitute(second))
+
     def bb_current_identifier():
         try:
             ctx = renpy.game.context()
@@ -391,6 +441,27 @@ init 20 python:
         except Exception as e:
             bb_log("could not build string map: %r" % e)
 
+        try:
+            tl = renpy.game.script.translator
+            for identifier, default_node in tl.default_translates.items():
+                translated_node = tl.language_translates.get((identifier, BB_TRANSLATED_LANGUAGE), None)
+                original = bb_node_text(default_node)
+                translated = bb_node_text(translated_node)
+
+                if original is None or translated is None:
+                    continue
+
+                original = bb_substitute(original)
+                translated = bb_substitute(translated)
+
+                if original is None or translated is None:
+                    continue
+
+                bb_original_to_translated.setdefault(original, translated)
+                bb_translated_to_original.setdefault(translated, original)
+        except Exception as e:
+            bb_log("could not build dialogue map: %r" % e)
+
         for original, translated in bb_original_to_translated.items():
             bb_translated_to_original.setdefault(translated, original)
 
@@ -463,9 +534,22 @@ init 20 python:
         if identifier:
             entry.bb_identifier = identifier
 
+        entry.bb_source_what = bb_strip_font_tags(entry.what)
+
         original = bb_node_text_for_identifier(identifier, None)
         if original is not None:
             entry.bb_original = bb_substitute(original)
+
+        translated = bb_node_text_for_identifier(identifier, BB_TRANSLATED_LANGUAGE)
+        if translated is not None:
+            entry.bb_translated = bb_substitute(translated)
+
+        if not hasattr(entry, "bb_original") or not hasattr(entry, "bb_translated"):
+            translated, original = bb_split_history_pair_text(entry.what)
+            if translated is not None and not hasattr(entry, "bb_translated"):
+                entry.bb_translated = translated
+            if original is not None and not hasattr(entry, "bb_original"):
+                entry.bb_original = original
 
     if bb_history_callback not in config.history_callbacks:
         config.history_callbacks.append(bb_history_callback)
@@ -812,18 +896,83 @@ init 20 python:
     if bb_sync_second_slow not in config.all_character_callbacks:
         config.all_character_callbacks.append(bb_sync_second_slow)
 
+    def bb_prepare_history_entry(entry):
+        if not hasattr(entry, "bb_source_what"):
+            try:
+                entry.bb_source_what = bb_strip_font_tags(entry.what)
+            except Exception:
+                pass
+
+        identifier = getattr(entry, "bb_identifier", None)
+        if identifier:
+            original = bb_node_text_for_identifier(identifier, None)
+            if original is not None:
+                entry.bb_original = bb_substitute(original)
+
+            translated = bb_node_text_for_identifier(identifier, BB_TRANSLATED_LANGUAGE)
+            if translated is not None:
+                entry.bb_translated = bb_substitute(translated)
+
+        if not hasattr(entry, "bb_original") or not hasattr(entry, "bb_translated"):
+            translated, original = bb_split_history_pair_text(getattr(entry, "what", None))
+            if translated is not None and not hasattr(entry, "bb_translated"):
+                entry.bb_translated = translated
+            if original is not None and not hasattr(entry, "bb_original"):
+                entry.bb_original = original
+
+        source = getattr(entry, "bb_source_what", getattr(entry, "what", None))
+        current_original = getattr(entry, "bb_original", None)
+        current_translated = getattr(entry, "bb_translated", None)
+
+        original = bb_original_text(source, identifier or "")
+        if original is not None:
+            if (
+                current_original is None
+                or current_original == source
+                or current_original == current_translated
+            ) and original != source:
+                entry.bb_original = original
+                current_original = original
+
+        translated = bb_translated_text(source, identifier or "")
+        if translated is not None:
+            if (
+                current_translated is None
+                or current_translated == source
+                or current_translated == current_original
+            ) and translated != current_original:
+                entry.bb_translated = translated
+
     def bb_history_pair(entry):
+        bb_prepare_history_entry(entry)
+
         identifier = getattr(entry, "bb_identifier", None)
         original = getattr(entry, "bb_original", None)
+        translated = getattr(entry, "bb_translated", None)
+        source = getattr(entry, "bb_source_what", entry.what)
 
         if original is None:
-            original = bb_original_text(entry.what, identifier or "")
+            original = bb_original_text(source, identifier or "")
 
-        translated = bb_translated_text(entry.what, identifier or "")
+        if translated is None:
+            translated = bb_translated_text(source, identifier or "")
+
         return bb_pair_from_values(translated, original)
 
     def bb_history_display_text(entry):
         return bb_join_pair(bb_history_pair(entry), with_fonts=True)
+
+    def bb_refresh_history_entries():
+        try:
+            history = list(_history_list)
+        except Exception:
+            return
+
+        for entry in history:
+            try:
+                bb_prepare_history_entry(entry)
+            except Exception:
+                pass
 
     def bb_history_allow_tags():
         try:
@@ -1120,6 +1269,7 @@ init 20 python:
         bb_clear_current_say_ranges()
         bb_clear_say_ranges_next_interact = True
         bb_refresh_current_say()
+        bb_refresh_history_entries()
         bb_refresh_scene_images()
         renpy.restart_interaction()
 
@@ -1256,51 +1406,11 @@ screen bb_say(who, what, bb_force_bilingual_window=False):
     if not renpy.variant("small"):
         add SideImage() xalign 0.0 yalign 1.0
 
-screen bb_quick_menu():
-    variant "touch"
+screen bb_quick_menu_language_fragment():
 
-    zorder 100
+    if getattr(persistent, "show_toggle_language", True):
+        textbutton bb_mode_name() action BBToggle() alternate Show("bb_language_picker")
 
-    if quick_menu:
-        hbox:
-            style_prefix "quick"
-            xalign 0.5
-            yalign 1.0
-
-            textbutton _("Back") action Rollback()
-            textbutton _("Skip") action Skip() alternate Skip(fast=True, confirm=True)
-            textbutton _("Auto") action Preference("auto-forward", "toggle")
-            textbutton _("Progress") action ShowMenu('progressmod')
-            textbutton _("Unlockables") action ShowMenu('unlockables')
-            if show_hints:
-                textbutton _("Hints") action ShowMenu('hinttracker')
-            textbutton bb_mode_name() action BBToggle() alternate Show("bb_language_picker")
-            textbutton _("Hide") action HideInterface()
-            if persistent.show_console:
-                textbutton _("Console") action QueueEvent("console")
-
-screen bb_quick_menu():
-
-    zorder 100
-
-    if quick_menu:
-        hbox:
-            style_prefix "quick"
-            xalign 0.5
-            yalign 1.0
-
-            textbutton _("History") action ShowMenu('history')
-            textbutton _("Skip") action Skip() alternate Skip(fast=True, confirm=True)
-            textbutton _("Auto") action Preference("auto-forward", "toggle")
-            textbutton _("Girls") action ShowMenu('amitrackerm2')
-            textbutton _("Progress") action ShowMenu('progressmod')
-            textbutton _("Unlockables") action ShowMenu('unlockables')
-            if show_hints:
-                textbutton _("Hints") action ShowMenu('hinttracker')
-            textbutton _("Save") action ShowMenu('save')
-            textbutton _("Load") action ShowMenu('load')
-            textbutton bb_mode_name() action BBToggle() alternate Show("bb_language_picker")
-            textbutton _("Prefs") action ShowMenu('preferences')
 
 screen bb_preferences_language_fragment():
 
@@ -1411,6 +1521,34 @@ init 999 python:
         action = keywords.get("action", "")
         return isinstance(action, str) and re.search(r"(^|[^A-Za-z0-9_])Language\s*\(", action) is not None
 
+    def bb_sl_is_textbutton(node):
+        try:
+            return getattr(node, "name", "") == "textbutton"
+        except Exception:
+            return False
+
+    def bb_sl_tree_has_language_action(node):
+        if bb_sl_has_language_action(node):
+            return True
+
+        for children in bb_sl_child_lists(node):
+            for child in list(children):
+                if bb_sl_tree_has_language_action(child):
+                    return True
+
+        return False
+
+    def bb_sl_tree_has_textbutton(node):
+        if bb_sl_is_textbutton(node):
+            return True
+
+        for children in bb_sl_child_lists(node):
+            for child in list(children):
+                if bb_sl_tree_has_textbutton(child):
+                    return True
+
+        return False
+
     def bb_sl_is_language_label(node):
         try:
             positional = getattr(node, "positional", [])
@@ -1492,6 +1630,49 @@ init 999 python:
 
         return None
 
+    def bb_sl_find_quick_menu_hboxes(node):
+        rv = []
+
+        for children in bb_sl_child_lists(node):
+            for child in list(children):
+                try:
+                    name = getattr(child, "name", "")
+                except Exception:
+                    name = ""
+
+                if name == "hbox":
+                    child_list = getattr(child, "children", None)
+                    if child_list and any(bb_sl_is_textbutton(grandchild) for grandchild in child_list):
+                        rv.append(child)
+
+                rv.extend(bb_sl_find_quick_menu_hboxes(child))
+
+        return rv
+
+    def bb_patch_quick_menu_children(children, replacement):
+        language_indices = []
+        button_indices = []
+
+        for index, child in enumerate(list(children)):
+            if bb_sl_tree_has_language_action(child):
+                language_indices.append(index)
+
+            if bb_sl_is_textbutton(child) or bb_sl_tree_has_textbutton(child):
+                button_indices.append(index)
+
+        if language_indices:
+            first = language_indices[0]
+            children[first] = replacement.copy(False)
+            for index in reversed(language_indices[1:]):
+                del children[index]
+            return True
+
+        if button_indices:
+            children.insert(button_indices[-1], replacement.copy(False))
+            return True
+
+        return False
+
     def bb_clone_screen_child(screen_name):
         try:
             variants = renpy.display.screen.get_all_screen_variants(screen_name)
@@ -1514,6 +1695,8 @@ init 999 python:
 
     bb_preferences_language_fragment_patched = False
     bb_preferences_language_fragment_warned = False
+    bb_quick_menu_language_fragment_patched = False
+    bb_quick_menu_language_fragment_warned = False
 
     def bb_invalidate_screen_analysis(screen):
         ast = getattr(screen, "ast", None)
@@ -1592,6 +1775,62 @@ init 999 python:
             except ValueError:
                 pass
 
+    def bb_patch_quick_menu_language_fragment(log_failure=True):
+        global bb_quick_menu_language_fragment_patched
+        global bb_quick_menu_language_fragment_warned
+
+        if bb_quick_menu_language_fragment_patched:
+            return True
+
+        replacement = bb_clone_screen_child("bb_quick_menu_language_fragment")
+        if replacement is None:
+            if log_failure and not bb_quick_menu_language_fragment_warned:
+                bb_log("quick menu language patch skipped, no replacement screen")
+                bb_quick_menu_language_fragment_warned = True
+            return False
+
+        patched = False
+
+        try:
+            variants = renpy.display.screen.get_all_screen_variants("quick_menu")
+        except Exception as e:
+            if log_failure and not bb_quick_menu_language_fragment_warned:
+                bb_log("quick menu language patch lookup failed: %r" % e)
+                bb_quick_menu_language_fragment_warned = True
+            return False
+
+        for _variant, screen in variants:
+            ast = getattr(screen, "ast", None)
+            screen_patched = False
+
+            for hbox in bb_sl_find_quick_menu_hboxes(ast):
+                children = getattr(hbox, "children", None)
+                if children and bb_patch_quick_menu_children(children, replacement):
+                    screen_patched = True
+
+            if screen_patched:
+                bb_invalidate_screen_analysis(screen)
+                patched = True
+
+        if patched:
+            bb_quick_menu_language_fragment_patched = True
+            renpy.display.screen.prepared = False
+            renpy.display.screen.analyzed = False
+            renpy.display.screen.screens_at_sort = {}
+            return True
+
+        if log_failure and not bb_quick_menu_language_fragment_warned:
+            bb_log("quick menu language patch skipped, no button hbox found")
+            bb_quick_menu_language_fragment_warned = True
+        return False
+
+    def bb_patch_quick_menu_language_fragment_interact():
+        if bb_patch_quick_menu_language_fragment():
+            try:
+                config.start_interact_callbacks.remove(bb_patch_quick_menu_language_fragment_interact)
+            except ValueError:
+                pass
+
     def bb_install_screen_alias(public_name, private_name, tag=None):
         try:
             variants = renpy.display.screen.get_all_screen_variants(private_name)
@@ -1634,8 +1873,10 @@ init 999 python:
             bb_log("screen alias install failed for %s -> %s: %r" % (private_name, public_name, e))
 
     bb_install_screen_alias("say", "bb_say")
-    bb_install_screen_alias("quick_menu", "bb_quick_menu")
     bb_install_screen_alias("history", "bb_history", "menu")
+    bb_patch_quick_menu_language_fragment(log_failure=False)
     bb_patch_preferences_language_fragment(log_failure=False)
+    if bb_patch_quick_menu_language_fragment_interact not in config.start_interact_callbacks:
+        config.start_interact_callbacks.append(bb_patch_quick_menu_language_fragment_interact)
     if bb_patch_preferences_language_fragment_interact not in config.start_interact_callbacks:
         config.start_interact_callbacks.append(bb_patch_preferences_language_fragment_interact)
