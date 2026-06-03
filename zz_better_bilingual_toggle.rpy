@@ -64,14 +64,8 @@ init 20 python:
         BB_MODE_ORIGINAL_FIRST,
     )
 
-    BB_ORIGINAL_FONT = "YuGothM.ttc"
-    BB_TRANSLATED_FONT_CANDIDATES = (
-        "tl/Chinese_E/customfonts/NotoSansSC-VF.woff2",
-        "tl/chinese/customfonts/NotoSansSC-VF.woff2",
-        "MiSans-Regular.ttf",
-        "NotoSansCJKsc-Regular.otf",
-        "NotoSans-Regular.ttf",
-    )
+    BB_ORIGINAL_FONT_ALIAS = "bb_original_dialogue_font"
+    BB_TRANSLATED_FONT_ALIAS = "bb_translated_dialogue_font"
 
     BB_SAVE_SLOT_REGEXP = r"^(?:auto|quick|\d+)-\d+$"
     BB_OLD_SUBSTITUTION_SAFE_PERCENT_RE = re.compile(
@@ -112,26 +106,120 @@ init 20 python:
 
     BB_TRANSLATED_LANGUAGE = bb_detect_language()
 
-    def bb_loadable(path):
+    def bb_clear_dialogue_metrics_cache():
         try:
-            return renpy.loadable(path)
-        except Exception:
-            return False
-
-    def bb_translated_font():
-        for candidate in BB_TRANSLATED_FONT_CANDIDATES:
-            if bb_loadable(candidate):
-                return candidate
-
-        try:
-            if isinstance(gui.text_font, str):
-                return gui.text_font
+            bb_dialogue_metrics_cache.clear()
         except Exception:
             pass
 
-        return "DejaVuSans.ttf"
+    def bb_runtime_cache():
+        try:
+            cache = getattr(renpy.game.script, "_bb_bilingual_runtime_cache", None)
+            if cache is None:
+                cache = {}
+                setattr(renpy.game.script, "_bb_bilingual_runtime_cache", cache)
+            return cache
+        except Exception:
+            return {}
 
-    BB_TRANSLATED_FONT = bb_translated_font()
+    def bb_original_font():
+        return bb_runtime_cache().get("original_dialogue_font", None)
+
+    def bb_set_original_font(font):
+        bb_runtime_cache()["original_dialogue_font"] = font
+
+    def bb_translated_font():
+        return bb_runtime_cache().get("translated_dialogue_font", None)
+
+    def bb_set_translated_font(font):
+        bb_runtime_cache()["translated_dialogue_font"] = font
+
+    def bb_font_signature(font):
+        try:
+            return repr(font)
+        except Exception:
+            return str(type(font))
+
+    def bb_resolve_font(font):
+        seen = set()
+
+        while isinstance(font, str) and font in config.font_name_map and font not in seen:
+            seen.add(font)
+            font = config.font_name_map[font]
+
+        return font
+
+    def bb_current_dialogue_font():
+        for getter in (
+            lambda: gui.dialogue_text_font,
+            lambda: gui.text_font,
+            lambda: style.say_dialogue.font,
+            lambda: style.default.font,
+        ):
+            try:
+                font = getter()
+            except Exception:
+                continue
+
+            if font is not None:
+                return font
+
+        return None
+
+    def bb_register_font_alias(alias, font):
+        if font is None:
+            return None
+
+        resolved = bb_resolve_font(font)
+
+        try:
+            old = config.font_name_map.get(alias, None)
+            if bb_font_signature(old) == bb_font_signature(resolved):
+                return alias
+            config.font_name_map[alias] = resolved
+        except Exception as e:
+            bb_log("could not register font alias %s: %r" % (alias, e))
+            return None
+
+        bb_clear_dialogue_metrics_cache()
+
+        return alias
+
+    def bb_capture_original_font():
+        font = bb_original_font()
+
+        if font is None:
+            font = bb_current_dialogue_font()
+            bb_set_original_font(font)
+
+        return bb_register_font_alias(BB_ORIGINAL_FONT_ALIAS, font)
+
+    def bb_capture_translated_font():
+        font = bb_current_dialogue_font()
+        if font is not None:
+            bb_set_translated_font(font)
+
+        return bb_register_font_alias(BB_TRANSLATED_FONT_ALIAS, bb_translated_font())
+
+    def bb_reset_translated_font():
+        bb_set_translated_font(None)
+        bb_clear_dialogue_metrics_cache()
+
+    def bb_capture_current_fonts():
+        bb_capture_original_font()
+
+        try:
+            language = getattr(_preferences, "language", None)
+        except Exception:
+            language = None
+
+        if (
+            bb_translated_font() is None
+            and language == BB_TRANSLATED_LANGUAGE
+            and bb_applied_language() == BB_TRANSLATED_LANGUAGE
+        ):
+            bb_capture_translated_font()
+
     bb_clear_say_ranges_next_interact = False
     bb_current_empty_window = config.empty_window
     bb_base_empty_window = getattr(
@@ -160,16 +248,17 @@ init 20 python:
         except Exception as e:
             bb_log("could not set game.preferences.language: %r" % e)
 
-        try:
-            contexts = list(renpy.game.contexts)
-        except Exception:
-            contexts = []
-
-        for ctx in contexts:
+        if bb_applied_language() == BB_TRANSLATED_LANGUAGE:
             try:
-                ctx.translate_language = BB_TRANSLATED_LANGUAGE
+                contexts = list(renpy.game.contexts)
             except Exception:
-                pass
+                contexts = []
+
+            for ctx in contexts:
+                try:
+                    ctx.translate_language = BB_TRANSLATED_LANGUAGE
+                except Exception:
+                    pass
 
     def bb_escape_old_substitution_percents(text):
         if not isinstance(text, str) or "%" not in text:
@@ -275,16 +364,40 @@ init 20 python:
 
         return [(BB_MODE_TRANSLATED, translated)]
 
-    def bb_language_for_text(language):
+    def bb_applied_language():
+        try:
+            return renpy.translation.old_language
+        except Exception:
+            return None
+
+    def bb_font_alias_ready(alias):
+        try:
+            return alias in config.font_name_map
+        except Exception:
+            return False
+
+    def bb_language_for_text(language, text=None):
         if language == BB_MODE_ORIGINAL:
-            return BB_ORIGINAL_FONT
-        return BB_TRANSLATED_FONT
+            if not bb_font_alias_ready(BB_ORIGINAL_FONT_ALIAS):
+                bb_capture_original_font()
+            return BB_ORIGINAL_FONT_ALIAS
+
+        if bb_translated_font() is None and bb_applied_language() == BB_TRANSLATED_LANGUAGE:
+            bb_capture_translated_font()
+
+        if not bb_font_alias_ready(BB_TRANSLATED_FONT_ALIAS):
+            bb_register_font_alias(
+                BB_TRANSLATED_FONT_ALIAS,
+                bb_translated_font() or bb_original_font() or bb_current_dialogue_font(),
+            )
+
+        return BB_TRANSLATED_FONT_ALIAS
 
     def bb_font_tag(language, text):
         if text is None:
             return ""
 
-        return "{font=%s}%s{/font}" % (bb_language_for_text(language), text)
+        return "{font=%s}%s{/font}" % (bb_language_for_text(language, text), text)
 
     def bb_join_pair(pair, with_fonts=False):
         lines = []
@@ -318,9 +431,9 @@ init 20 python:
             return None
 
         font = font_match.group(1)
-        if font == BB_ORIGINAL_FONT:
+        if font == BB_ORIGINAL_FONT_ALIAS:
             return BB_MODE_ORIGINAL
-        if font == BB_TRANSLATED_FONT:
+        if font == BB_TRANSLATED_FONT_ALIAS:
             return BB_MODE_TRANSLATED
         return None
 
@@ -343,15 +456,27 @@ init 20 python:
         if first_language == BB_MODE_ORIGINAL and second_language == BB_MODE_TRANSLATED:
             return (bb_substitute(second), bb_substitute(first))
 
-        bb_build_string_maps()
+        bb_build_history_dialogue_maps()
 
-        if first in bb_original_to_translated or second in bb_translated_to_original:
+        if first in bb_original_to_translated:
             return (bb_substitute(bb_original_to_translated.get(first, second)), bb_substitute(first))
 
-        if first in bb_translated_to_original or second in bb_original_to_translated:
-            return (bb_substitute(first), bb_substitute(bb_original_to_translated.get(second, second)))
+        if first in bb_translated_to_original:
+            return (bb_substitute(first), bb_substitute(bb_translated_to_original.get(first, second)))
 
-        return (bb_substitute(first), bb_substitute(second))
+        if second in bb_original_to_translated:
+            return (bb_substitute(bb_original_to_translated.get(second, first)), bb_substitute(second))
+
+        if second in bb_translated_to_original:
+            return (bb_substitute(second), bb_substitute(bb_translated_to_original.get(second, first)))
+
+        if bb_current_mode() == BB_MODE_TRANSLATED_FIRST:
+            return (bb_substitute(first), bb_substitute(second))
+
+        if bb_current_mode() == BB_MODE_ORIGINAL_FIRST:
+            return (bb_substitute(second), bb_substitute(first))
+
+        return (None, None)
 
     def bb_current_identifier():
         try:
@@ -425,8 +550,22 @@ init 20 python:
             return text
 
     bb_string_maps_ready = False
+    bb_history_dialogue_maps_ready = False
     bb_original_to_translated = {}
     bb_translated_to_original = {}
+
+    def bb_reset_text_maps():
+        global bb_string_maps_ready
+        global bb_history_dialogue_maps_ready
+
+        bb_string_maps_ready = False
+        bb_history_dialogue_maps_ready = False
+
+        try:
+            bb_original_to_translated.clear()
+            bb_translated_to_original.clear()
+        except Exception:
+            pass
 
     def bb_build_string_maps():
         global bb_string_maps_ready
@@ -437,9 +576,21 @@ init 20 python:
         try:
             strings = renpy.game.script.translator.strings.get(BB_TRANSLATED_LANGUAGE, None)
             if strings is not None:
-                bb_original_to_translated.update(strings.translations)
+                for original, translated in strings.translations.items():
+                    bb_original_to_translated.setdefault(original, translated)
+                    bb_translated_to_original.setdefault(translated, original)
         except Exception as e:
             bb_log("could not build string map: %r" % e)
+
+        bb_string_maps_ready = True
+
+    def bb_build_history_dialogue_maps():
+        global bb_history_dialogue_maps_ready
+
+        if bb_history_dialogue_maps_ready:
+            return
+
+        bb_build_string_maps()
 
         try:
             tl = renpy.game.script.translator
@@ -460,12 +611,27 @@ init 20 python:
                 bb_original_to_translated.setdefault(original, translated)
                 bb_translated_to_original.setdefault(translated, original)
         except Exception as e:
-            bb_log("could not build dialogue map: %r" % e)
+            bb_log("could not build history dialogue map: %r" % e)
 
-        for original, translated in bb_original_to_translated.items():
-            bb_translated_to_original.setdefault(translated, original)
+        bb_history_dialogue_maps_ready = True
 
-        bb_string_maps_ready = True
+    def bb_history_original_text(text, identifier=None):
+        original = bb_original_text(text, identifier)
+
+        if identifier or text is None or original != text:
+            return original
+
+        bb_build_history_dialogue_maps()
+        return bb_substitute(bb_translated_to_original.get(text, text))
+
+    def bb_history_translated_text(text, identifier=None):
+        translated = bb_translated_text(text, identifier)
+
+        if identifier or text is None or translated != text:
+            return translated
+
+        bb_build_history_dialogue_maps()
+        return bb_substitute(bb_original_to_translated.get(text, text))
 
     def bb_original_text(text, identifier=None):
         if identifier is None:
@@ -658,13 +824,13 @@ init 20 python:
 
         return tuple(values)
 
-    def bb_dialogue_render_props(language=None, outlined=False):
+    def bb_dialogue_render_props(language=None, outlined=False, text=None):
         props = {
             "style": "bb_dialogue",
             "substitute": False,
             "slow": False,
             "size": bb_dialogue_size(),
-            "font": bb_language_for_text(language),
+            "font": bb_language_for_text(language, text),
         }
 
         if outlined:
@@ -746,7 +912,7 @@ init 20 python:
             int(gui.dialogue_width),
             int(config.screen_height),
             bb_dialogue_size(),
-            bb_language_for_text(language),
+            bb_language_for_text(language, text),
             bb_style_signature(ruby_style),
         )
 
@@ -755,7 +921,7 @@ init 20 python:
             return rv
 
         try:
-            probe = renpy.text.text.Text(text, **bb_dialogue_render_props(language, outlined))
+            probe = renpy.text.text.Text(text, **bb_dialogue_render_props(language, outlined, text))
             rendered = renpy.display.render.render(probe, gui.dialogue_width, config.screen_height, 0, 0)
             height = max(1, int(math.ceil(rendered.get_size()[1])))
 
@@ -924,7 +1090,7 @@ init 20 python:
         current_original = getattr(entry, "bb_original", None)
         current_translated = getattr(entry, "bb_translated", None)
 
-        original = bb_original_text(source, identifier or "")
+        original = bb_history_original_text(source, identifier or "")
         if original is not None:
             if (
                 current_original is None
@@ -934,7 +1100,7 @@ init 20 python:
                 entry.bb_original = original
                 current_original = original
 
-        translated = bb_translated_text(source, identifier or "")
+        translated = bb_history_translated_text(source, identifier or "")
         if translated is not None:
             if (
                 current_translated is None
@@ -952,10 +1118,10 @@ init 20 python:
         source = getattr(entry, "bb_source_what", entry.what)
 
         if original is None:
-            original = bb_original_text(source, identifier or "")
+            original = bb_history_original_text(source, identifier or "")
 
         if translated is None:
-            translated = bb_translated_text(source, identifier or "")
+            translated = bb_history_translated_text(source, identifier or "")
 
         return bb_pair_from_values(translated, original)
 
@@ -1252,6 +1418,7 @@ init 20 python:
 
         if bb_current_mode() == mode:
             bb_sync_engine_language()
+            bb_capture_current_fonts()
             return
 
         persistent.bb_mode = mode
@@ -1259,6 +1426,7 @@ init 20 python:
         persistent.ll_fast_original_mode = mode in (BB_MODE_ORIGINAL, BB_MODE_ORIGINAL_FIRST)
 
         bb_sync_engine_language()
+        bb_capture_current_fonts()
 
         try:
             renpy.loader.loadable_cache.clear()
@@ -1276,6 +1444,7 @@ init 20 python:
     def bb_start_callback():
         bb_init_persistent()
         bb_sync_engine_language()
+        bb_capture_current_fonts()
 
     def bb_after_load_callback():
         global bb_clear_say_ranges_next_interact
@@ -1283,9 +1452,21 @@ init 20 python:
         bb_clear_say_ranges_next_interact = False
         bb_init_persistent()
         bb_sync_engine_language()
+        bb_reapply_current_language_styles()
+        bb_reset_translated_font()
+        bb_reset_text_maps()
+        bb_capture_current_fonts()
+
+    def bb_reapply_current_language_styles():
+        try:
+            renpy.translation.change_language(BB_TRANSLATED_LANGUAGE, force=True, rebuild=True)
+        except Exception as e:
+            bb_log("could not reapply language styles after load: %r" % e)
 
     bb_init_persistent()
+    bb_capture_original_font()
     bb_sync_engine_language()
+    bb_capture_current_fonts()
 
     bb_say._bb_base_say = bb_base_say
     renpy.exports.say = bb_say
@@ -1368,7 +1549,7 @@ screen bb_say(who, what, bb_force_bilingual_window=False):
                         style "bb_dialogue"
                         substitute False
                         ypos bb_top_pad
-                        font bb_language_for_text(bb_current_language)
+                        font bb_language_for_text(bb_current_language, bb_current_what)
                         ruby_style bb_ruby_style()
                         size bb_dialogue_size()
                         if bb_opacity <= 0.5:
@@ -1386,7 +1567,7 @@ screen bb_say(who, what, bb_force_bilingual_window=False):
                             substitute False
                             slow True
                             ypos bb_top_pad
-                            font bb_language_for_text(bb_second_language)
+                            font bb_language_for_text(bb_second_language, bb_second_what)
                             ruby_style bb_ruby_style()
                             size bb_dialogue_size()
                             if bb_opacity <= 0.5:
@@ -1399,9 +1580,9 @@ screen bb_say(who, what, bb_force_bilingual_window=False):
 
         else:
             if bb_opacity <= 0.5:
-                text bb_current_what id "what" substitute False font bb_language_for_text(bb_current_language) color "#fff" outlines [(absolute(1), "#242424", absolute(1), absolute(1))] ruby_style bb_ruby_style() size persistent.dialogue_text_size
+                text bb_current_what id "what" substitute False font bb_language_for_text(bb_current_language, bb_current_what) color "#fff" outlines [(absolute(1), "#242424", absolute(1), absolute(1))] ruby_style bb_ruby_style() size persistent.dialogue_text_size
             else:
-                text bb_current_what id "what" substitute False font bb_language_for_text(bb_current_language) size persistent.dialogue_text_size
+                text bb_current_what id "what" substitute False font bb_language_for_text(bb_current_language, bb_current_what) size persistent.dialogue_text_size
 
     if not renpy.variant("small"):
         add SideImage() xalign 0.0 yalign 1.0
