@@ -66,6 +66,7 @@ init 20 python:
 
     BB_ORIGINAL_FONT_ALIAS = "bb_original_dialogue_font"
     BB_TRANSLATED_FONT_ALIAS = "bb_translated_dialogue_font"
+    BB_DEBUG = False
 
     BB_SAVE_SLOT_REGEXP = r"^(?:auto|quick|\d+)-\d+$"
     BB_OLD_SUBSTITUTION_SAFE_PERCENT_RE = re.compile(
@@ -78,10 +79,31 @@ init 20 python:
         except Exception:
             pass
 
+    def bb_debug_value(value, limit=90):
+        try:
+            rv = repr(value)
+        except Exception:
+            rv = "<repr failed: %s>" % type(value).__name__
+
+        if len(rv) > limit:
+            rv = rv[:limit] + "...<%d chars>" % len(rv)
+
+        return rv
+
+    def bb_debug_font(font):
+        try:
+            return "%s %s" % (type(font).__name__, bb_debug_value(font, 140))
+        except Exception:
+            return "<font debug failed>"
+
+    def bb_debug(message):
+        return
+
     def bb_known_languages():
         try:
-            return list(renpy.known_languages())
-        except Exception:
+            rv = list(renpy.known_languages())
+            return rv
+        except Exception as e:
             return []
 
     def bb_detect_language():
@@ -121,6 +143,12 @@ init 20 python:
             return cache
         except Exception:
             return {}
+
+    def bb_reset_progress_event_title_cache():
+        try:
+            bb_runtime_cache().pop("progress_event_title_originals", None)
+        except Exception:
+            pass
 
     def bb_original_font():
         return bb_runtime_cache().get("original_dialogue_font", None)
@@ -233,17 +261,21 @@ init 20 python:
 
     def bb_sync_engine_language():
         """Keep Ren'Py executing the translated script while this mod changes display."""
+
         try:
+            old = getattr(config, "language", None)
             config.language = BB_TRANSLATED_LANGUAGE
         except Exception as e:
             bb_log("could not set config.language: %r" % e)
 
         try:
+            old = getattr(_preferences, "language", None)
             _preferences.language = BB_TRANSLATED_LANGUAGE
         except Exception as e:
             bb_log("could not set _preferences.language: %r" % e)
 
         try:
+            old = getattr(renpy.game.preferences, "language", None)
             renpy.game.preferences.language = BB_TRANSLATED_LANGUAGE
         except Exception as e:
             bb_log("could not set game.preferences.language: %r" % e)
@@ -256,6 +288,7 @@ init 20 python:
 
             for ctx in contexts:
                 try:
+                    old = getattr(ctx, "translate_language", None)
                     ctx.translate_language = BB_TRANSLATED_LANGUAGE
                 except Exception:
                     pass
@@ -279,6 +312,7 @@ init 20 python:
         return rv
 
     def bb_say(who, what, *args, **kwargs):
+
         if getattr(config, "old_substitutions", False):
             what = bb_escape_old_substitution_percents(what)
 
@@ -372,8 +406,9 @@ init 20 python:
 
     def bb_font_alias_ready(alias):
         try:
-            return alias in config.font_name_map
-        except Exception:
+            rv = alias in config.font_name_map
+            return rv
+        except Exception as e:
             return False
 
     def bb_language_for_text(language, text=None):
@@ -393,11 +428,750 @@ init 20 python:
 
         return BB_TRANSLATED_FONT_ALIAS
 
+    def bb_progress_event_titles_use_original():
+        return bb_current_mode() in (BB_MODE_ORIGINAL, BB_MODE_ORIGINAL_FIRST)
+
+    def bb_progress_event_titles_need_custom_translation():
+        return bb_progress_event_titles_use_original() or bb_is_bilingual_mode()
+
+    def bb_progress_event_objects():
+        try:
+            store_values = list(vars(renpy.store).items())
+        except Exception:
+            return []
+
+        rv = []
+        for name, value in store_values:
+            if not name.startswith("ev_"):
+                continue
+
+            try:
+                if value.__class__.__name__ != "Event":
+                    continue
+            except Exception:
+                continue
+
+            rv.append(value)
+
+        return rv
+
+    def bb_progress_event_original_name(event):
+        try:
+            original = getattr(event, "_bb_original_name", None)
+            if isinstance(original, str):
+                return original
+
+            original = event.__dict__.get("name", None)
+            if isinstance(original, str):
+                return original
+        except Exception:
+            pass
+
+        return None
+
+    def bb_progress_event_visible_title_length(*values):
+        rv = 0
+
+        for value in values:
+            if not isinstance(value, str):
+                continue
+
+            try:
+                plain = re.sub(r"\{[^}]*\}", "", value)
+            except Exception:
+                plain = value
+
+            for line in plain.splitlines() or [plain]:
+                rv = max(rv, len(line))
+
+        return rv
+
+    def bb_progress_event_translated_title(text):
+        try:
+            return bb_base_translate_string(text, BB_TRANSLATED_LANGUAGE)
+        except Exception:
+            return text
+
+    def bb_progress_event_title_text(text):
+        if not isinstance(text, str):
+            return text
+
+        translated = bb_progress_event_translated_title(text)
+
+        if bb_is_bilingual_mode():
+            value = bb_join_pair(
+                bb_pair_from_values(translated, text),
+                with_fonts=True,
+            )
+            return value
+
+        if bb_progress_event_titles_use_original():
+            return text
+
+        return translated
+
+    def bb_progress_event_color(event):
+        try:
+            var_name = getattr(event, "var_name", "")
+            if "lust" in var_name or var_name in ["day98", "day68", "day86"]:
+                return "FF85FD"
+            if "invite" in var_name:
+                return "778EFF"
+        except Exception:
+            pass
+
+        return None
+
+    def bb_progress_wrap_text_tag(text, start, end):
+        if not isinstance(text, str):
+            return text
+
+        lines = text.split("\n")
+        return "\n".join([start + line + end for line in lines])
+
+    def bb_progress_event_colored_title_text(text, color):
+        if not isinstance(text, str) or not color:
+            return bb_progress_event_title_text(text)
+
+        colored_original = "{color=%s}%s{/color}" % (color, text)
+        colored_translated = bb_progress_event_translated_title(colored_original)
+
+        if colored_translated == colored_original:
+            malformed_colored_original = "{color=%s}%s{/size}" % (color, text)
+            malformed_colored_translated = bb_progress_event_translated_title(malformed_colored_original)
+            if malformed_colored_translated != malformed_colored_original:
+                colored_translated = malformed_colored_translated
+
+        if colored_translated != colored_original:
+            if bb_is_bilingual_mode():
+                return bb_join_pair(
+                    bb_pair_from_values(colored_translated, colored_original),
+                    with_fonts=True,
+                )
+
+            if bb_progress_event_titles_use_original():
+                return colored_original
+
+            return colored_translated
+
+        return bb_progress_wrap_text_tag(
+            bb_progress_event_title_text(text),
+            "{color=%s}" % color,
+            "{/color}",
+        )
+
+    def bb_progress_read_loader_text(path):
+        try:
+            f = renpy.loader.load(path)
+        except Exception:
+            return ""
+
+        try:
+            data = f.read()
+        except Exception:
+            data = ""
+
+        try:
+            f.close()
+        except Exception:
+            pass
+
+        if isinstance(data, bytes):
+            try:
+                return data.decode("utf-8")
+            except Exception:
+                return data.decode("utf-8", "replace")
+
+        return data if isinstance(data, str) else ""
+
+    def bb_progress_missed_event_titles():
+        cache = bb_runtime_cache()
+        rv = cache.get("progress_missed_event_titles", None)
+        if rv is not None:
+            return rv
+
+        rv = {}
+        tracker_paths = (
+            "progress mod/trackers/ch1tracker.rpy",
+            "progress mod/trackers/ch2tracker.rpy",
+            "progress mod/trackers/ch3tracker.rpy",
+            "progress mod/trackers/ch4tracker.rpy",
+            "progress mod/trackers/girltracker.rpy",
+            "progress mod/trackers/happytracker.rpy",
+        )
+
+        for path in tracker_paths:
+            text = bb_progress_read_loader_text(path)
+            if not text:
+                continue
+
+            lines = text.splitlines()
+            for index, line in enumerate(lines):
+                if ".missed" not in line or "ev_" not in line:
+                    continue
+
+                match = re.search(r"ev_([A-Za-z0-9_]+)\.missed", line)
+                if not match:
+                    continue
+
+                for follow in lines[index + 1:index + 7]:
+                    title_match = re.search(
+                        r"""text(?:button)?\s+_\(\s*(['"])(\{color=EF1A1A\}\{s\}.*?\{/s\}\{/color\})\1""",
+                        follow,
+                    )
+                    if title_match:
+                        rv[match.group(1)] = title_match.group(2)
+                        break
+
+        cache["progress_missed_event_titles"] = rv
+        return rv
+
+    def bb_progress_missed_event_title_text(event):
+        try:
+            var_name = getattr(event, "var_name", "")
+            title = bb_progress_missed_event_titles().get(var_name, None)
+        except Exception:
+            title = None
+
+        if title:
+            return bb_progress_event_title_text(title)
+
+        return None
+
+    def bb_progress_hint_event_title(event):
+        title = bb_progress_event_original_name(event)
+        if title is None:
+            title = getattr(event, "name", "")
+
+        color = bb_progress_event_color(event)
+        if color:
+            return bb_progress_event_colored_title_text(title, color)
+
+        return bb_progress_event_title_text(title)
+
+    def bb_progress_hint_rows():
+        try:
+            hint_keys = set(ProgressMod.current_hints.keys())
+        except Exception:
+            hint_keys = set()
+
+        rows = []
+
+        try:
+            main_chapter = "maintrackerch" + str(current_chapter) + "m"
+        except Exception:
+            main_chapter = "maintrackerch1m"
+
+        def add_row(event, girl_label, girl_screen=None, showgirl_name=None, girl_text_style="hint_text", happy=False):
+            try:
+                if getattr(event, "var_name", None) not in hint_keys:
+                    return
+
+                hint = getattr(event, "hint", "")
+                if happy and not show_happy_hints:
+                    hint = ""
+
+                rows.append({
+                    "event": event,
+                    "girl_label": girl_label,
+                    "girl_screen": girl_screen,
+                    "showgirl_name": showgirl_name,
+                    "girl_text_style": girl_text_style,
+                    "event_title": bb_progress_hint_event_title(event),
+                    "hint": hint,
+                    "hint_action": "(!)" in hint,
+                })
+            except Exception:
+                pass
+
+        try:
+            main_label = "Main event" if dark_mode else MainEvent.colored_name
+            for event in MainEvent.event_list:
+                add_row(event, main_label, girl_screen=main_chapter)
+        except Exception:
+            pass
+
+        try:
+            for event in HappyEvent.event_list:
+                add_row(event, HappyEvent.colored_name, girl_screen="secrettrackerm", happy=True)
+        except Exception:
+            pass
+
+        try:
+            for girl in ProgressMod.all_girls:
+                if girl in [MainEvent, HappyEvent] or not girl.active:
+                    continue
+
+                for event in girl.event_list:
+                    add_row(
+                        event,
+                        girl.colored_name,
+                        girl_screen="amitrackerm2",
+                        showgirl_name=girl.name,
+                        girl_text_style="amihint",
+                    )
+        except Exception:
+            pass
+
+        return rows
+
+    def bb_progress_text_style_for_girl(girl, suffix="mod"):
+        try:
+            name = getattr(girl, "name", "")
+            if not isinstance(name, str) or not name:
+                return "mod"
+
+            if suffix == "mod" and dark_mode and name in ("Io", "Touka", "Tsubasa", "Yuki"):
+                return name.lower() + "mod_dark"
+
+            return name.lower() + suffix
+        except Exception:
+            return "mod"
+
+    def bb_progress_event_colored_title(event, completed=False, missed=False):
+        if completed:
+            title = bb_progress_event_original_name(event)
+            if title is None:
+                title = getattr(event, "name", "")
+            title = bb_progress_event_title_text("%s {b}\u2713{/b}" % title)
+        else:
+            title = bb_progress_hint_event_title(event)
+
+        if missed:
+            missed_title = bb_progress_missed_event_title_text(event)
+            if missed_title:
+                return missed_title
+
+            title = bb_progress_event_original_name(event)
+            if title is None:
+                title = getattr(event, "name", "")
+            title = bb_progress_wrap_text_tag(
+                bb_progress_event_title_text(title),
+                "{color=EF1A1A}{s}",
+                "{/s}{/color}",
+            )
+
+        return title
+
+    def bb_progress_tracker_row(event, previous_screen):
+        try:
+            completed = bool(getattr(event, "completed", False))
+            missed = bool(getattr(event, "missed", False))
+            visible = (not completed and not missed) or bool(show_complete)
+        except Exception:
+            visible = False
+
+        if not visible:
+            return None
+
+        hint = ""
+        hint_action = False
+
+        try:
+            if show_hints and not _in_replay:
+                hint = getattr(event, "hint", "") or ""
+                hint_action = "(!)" in hint
+        except Exception:
+            pass
+
+        return {
+            "event": event,
+            "completed": completed,
+            "missed": missed,
+            "title": bb_progress_event_colored_title(event, completed=completed, missed=missed),
+            "hint": hint,
+            "hint_action": hint_action,
+            "previous_screen": previous_screen,
+        }
+
+    def bb_progress_main_rows(chapter):
+        rows = []
+
+        try:
+            chapter = int(chapter)
+        except Exception:
+            chapter = 1
+
+        try:
+            for event in MainEvent.event_list:
+                if getattr(event, "chapter", None) != chapter:
+                    continue
+
+                row = bb_progress_tracker_row(event, "main")
+                if row is not None:
+                    row["previous_screen"] = "maintrackerch%dm" % chapter
+                    rows.append(row)
+        except Exception as e:
+            bb_log("could not build main tracker rows: %r" % e)
+
+        return rows
+
+    def bb_progress_current_girl():
+        try:
+            girl = eval(showgirl)
+            if getattr(girl, "__class__", None).__name__ in ("Girl", "StoryEvent"):
+                return girl
+        except Exception:
+            pass
+
+        try:
+            for girl in ProgressMod.all_girls:
+                if getattr(girl, "name", None) == showgirl:
+                    return girl
+        except Exception:
+            pass
+
+        return None
+
+    def bb_progress_girl_points(girl):
+        try:
+            name = getattr(girl, "name", "").lower()
+            return eval(name + "point") + eval(name + "miss")
+        except Exception:
+            return 0
+
+    def bb_progress_girl_thumbnail(girl):
+        try:
+            name = getattr(girl, "name", "")
+            if not isinstance(name, str) or not name:
+                return None
+
+            return "images/" + name.lower() + "thumb1.png"
+        except Exception:
+            return None
+
+    def bb_progress_girl_thumbnail_idle(girl):
+        path = bb_progress_girl_thumbnail(girl)
+        if not path:
+            return path
+
+        try:
+            if getattr(girl, "has_hint", False) or not desaturate_girls:
+                return path
+
+            return im.Grayscale(path)
+        except Exception:
+            return path
+
+    def bb_progress_girl_rows():
+        rows = []
+
+        try:
+            girl = bb_progress_current_girl()
+            if girl is None:
+                return rows
+
+            for event in getattr(girl, "event_list", []):
+                row = bb_progress_tracker_row(event, "girls")
+                if row is not None:
+                    rows.append(row)
+        except Exception as e:
+            bb_log("could not build girl tracker rows: %r" % e)
+
+        return rows
+
+    def bb_progress_main_prev_screen(chapter):
+        try:
+            chapter = int(chapter)
+        except Exception:
+            chapter = 1
+
+        return "maintrackerch%dm" % max(1, chapter - 1)
+
+    def bb_progress_main_next_screen(chapter):
+        try:
+            chapter = int(chapter)
+        except Exception:
+            chapter = 1
+
+        try:
+            max_main_chapter = int(getattr(MainEvent.event_list[-1], "chapter", chapter))
+        except Exception:
+            max_main_chapter = chapter
+
+        return "maintrackerch%dm" % min(max_main_chapter, chapter + 1)
+
+    def bb_progress_girl_header():
+        girl = bb_progress_current_girl()
+        if girl is None:
+            return ""
+
+        try:
+            love = eval(getattr(girl, "name", "").lower() + "_love")
+            lust = eval(getattr(girl, "name", "").lower() + "_lust")
+        except Exception:
+            return getattr(girl, "colored_name", getattr(girl, "name", ""))
+
+        try:
+            if lust == "N/A":
+                return "%s (%s Affection)" % (getattr(girl, "colored_name", girl.name), love)
+
+            return "%s (%s Affection/%s Lust)" % (getattr(girl, "colored_name", girl.name), love, lust)
+        except Exception:
+            return getattr(girl, "colored_name", getattr(girl, "name", ""))
+
+    def bb_progress_visible_girls():
+        rows = []
+
+        try:
+            for girl in ProgressMod.all_girls:
+                if girl in [MainEvent, HappyEvent] or not getattr(girl, "active", False):
+                    continue
+
+                if not show_completed_girls:
+                    try:
+                        max_values = getattr(girl, "max", None)
+                        chapter_max = None
+
+                        try:
+                            chapter_max = max_values[current_chapter]
+                        except Exception:
+                            chapter_max = getattr(girl, "current_max", 0)
+
+                        if bb_progress_girl_points(girl) == chapter_max:
+                            continue
+                    except Exception:
+                        pass
+
+                rows.append(girl)
+        except Exception as e:
+            bb_log("could not build visible girl list: %r" % e)
+
+        return rows
+
+    def bb_progress_visible_girl_rows():
+        first_row_names = (
+            "Ami", "Ayane", "Chika", "Chinami", "Futaba", "Haruka",
+            "Imani", "Io", "Kaori", "Karin", "Kirin", "Maki",
+            "Makoto", "Maya", "Miku", "Molly", "Nao", "Niki",
+        )
+        first_row_names = set(first_row_names)
+
+        row_one = []
+        row_two = []
+
+        for girl in bb_progress_visible_girls():
+            try:
+                name = getattr(girl, "name", "")
+            except Exception:
+                name = ""
+
+            if name in first_row_names:
+                row_one.append(girl)
+            else:
+                row_two.append(girl)
+
+        rows = []
+        for row in (row_one, row_two):
+            while row:
+                rows.append(row[:18])
+                row = row[18:]
+
+        return rows
+
+    def bb_add_progress_event_title(titles, text):
+        if not isinstance(text, str) or not text:
+            return
+
+        titles.add(text)
+
+        check_suffix = " {b}\u2713{/b}"
+        if text.endswith(check_suffix):
+            titles.add(text[:-len(check_suffix)])
+
+    def bb_collect_translated_event_titles(titles):
+        check_suffix = " {b}\u2713{/b}"
+
+        try:
+            strings = renpy.game.script.translator.strings.get(BB_TRANSLATED_LANGUAGE, None)
+            translations = strings.translations if strings is not None else {}
+        except Exception:
+            translations = {}
+
+        try:
+            keys = list(translations.keys())
+        except Exception:
+            keys = []
+
+        for text in keys:
+            if not isinstance(text, str):
+                continue
+
+            if text.endswith(check_suffix):
+                bb_add_progress_event_title(titles, text)
+                continue
+
+            if "{s}" in text and "{/s}" in text:
+                bb_add_progress_event_title(titles, text)
+
+    def bb_progress_event_title_originals():
+        cache = bb_runtime_cache()
+        titles = cache.get("progress_event_title_originals", None)
+        if titles is not None:
+            return titles
+
+        titles = set()
+        for event in bb_progress_event_objects():
+            original = bb_progress_event_original_name(event)
+            if not original:
+                continue
+
+            bb_add_progress_event_title(titles, original)
+            bb_add_progress_event_title(titles, "%s {b}\u2713{/b}" % original)
+
+        bb_collect_translated_event_titles(titles)
+        cache["progress_event_title_originals"] = titles
+        return titles
+
+    def bb_is_progress_event_title_string(text):
+        if not isinstance(text, str):
+            return False
+
+        return text in bb_progress_event_title_originals()
+
+    def bb_progress_event_name_getter(event):
+        original = bb_progress_event_original_name(event)
+        if original is None:
+            return ""
+
+        return bb_progress_event_title_text(original)
+
+    def bb_progress_event_name_setter(event, value):
+        try:
+            event._bb_original_name = value
+        except Exception:
+            pass
+
+        try:
+            event.__dict__["name"] = value
+        except Exception:
+            pass
+
+    def bb_patch_progress_event_names():
+        event_class = None
+        titles = bb_runtime_cache().get("progress_event_title_originals", None)
+
+        if titles is not None:
+            bb_collect_translated_event_titles(titles)
+
+        for event in bb_progress_event_objects():
+            original = bb_progress_event_original_name(event)
+            if original is not None:
+                try:
+                    event._bb_original_name = original
+                except Exception:
+                    pass
+
+                if titles is not None:
+                    bb_add_progress_event_title(titles, original)
+                    bb_add_progress_event_title(titles, "%s {b}\u2713{/b}" % original)
+
+            try:
+                event_class = event.__class__
+            except Exception:
+                pass
+
+        if event_class is None:
+            bb_patch_progress_update_all()
+            return
+
+        try:
+            if not getattr(event_class, "_bb_name_property_installed", False):
+                event_class.name = property(
+                    bb_progress_event_name_getter,
+                    bb_progress_event_name_setter,
+                )
+                event_class._bb_name_property_installed = True
+        except Exception as e:
+            bb_log("could not patch progress event names: %r" % e)
+
+        bb_patch_progress_update_all()
+
+    def bb_recalculate_progress_longest_name(progress_mod):
+        try:
+            longest = 0
+            current_hints = getattr(progress_mod, "current_hints", {})
+
+            for girl in getattr(progress_mod, "all_girls", []):
+                for event in getattr(girl, "event_list", []):
+                    if getattr(event, "var_name", None) not in current_hints:
+                        continue
+
+                    name = bb_progress_event_original_name(event)
+                    translated = bb_progress_event_translated_title(name)
+                    longest = max(
+                        longest,
+                        bb_progress_event_visible_title_length(name, translated),
+                    )
+
+            progress_mod.longest_name = longest
+        except Exception as e:
+            bb_log("could not recalculate progress longest_name: %r" % e)
+
+    def bb_patch_progress_update_all():
+        try:
+            progress_mod = getattr(renpy.store, "ProgressMod", None)
+            progress_class = progress_mod.__class__ if progress_mod is not None else None
+            update_all = getattr(progress_class, "update_all", None)
+        except Exception:
+            return
+
+        if progress_mod is None or progress_class is None or update_all is None:
+            return
+
+        if getattr(update_all, "_bb_progress_update_all", False):
+            return
+
+        def bb_progress_update_all(self, *args, **kwargs):
+            rv = update_all(self, *args, **kwargs)
+            bb_recalculate_progress_longest_name(self)
+            return rv
+
+        bb_progress_update_all._bb_progress_update_all = True
+
+        try:
+            progress_class.update_all = bb_progress_update_all
+        except Exception as e:
+            bb_log("could not patch progress update_all: %r" % e)
+
+    bb_translation_default = renpy.translation.Default
+    bb_base_translate_string = getattr(
+        renpy.translation,
+        "_bb_base_translate_string",
+        renpy.translation.translate_string,
+    )
+
+    def bb_translate_string(text, language=bb_translation_default):
+        if (
+            language is bb_translation_default
+            and bb_progress_event_titles_need_custom_translation()
+            and bb_is_progress_event_title_string(text)
+        ):
+            return bb_progress_event_title_text(text)
+
+        return bb_base_translate_string(text, language)
+
+    if not hasattr(renpy.translation, "_bb_base_translate_string"):
+        renpy.translation._bb_base_translate_string = bb_base_translate_string
+
+    renpy.translation.translate_string = bb_translate_string
+    renpy.translate_string = bb_translate_string
+    try:
+        renpy.exports.translate_string = bb_translate_string
+    except Exception:
+        pass
+    try:
+        renpy.store.__ = bb_translate_string
+    except Exception:
+        pass
+
     def bb_font_tag(language, text):
         if text is None:
             return ""
 
-        return "{font=%s}%s{/font}" % (bb_language_for_text(language, text), text)
+        alias = bb_language_for_text(language, text)
+        rv = "{font=%s}%s{/font}" % (alias, text)
+        return rv
 
     def bb_join_pair(pair, with_fonts=False):
         lines = []
@@ -518,7 +1292,7 @@ init 20 python:
 
         try:
             tl = renpy.game.script.translator
-        except Exception:
+        except Exception as e:
             return None
 
         for candidate in bb_identifier_candidates(identifier):
@@ -537,6 +1311,8 @@ init 20 python:
         if text is None:
             return None
 
+        original = text
+
         try:
             if config.old_substitutions:
                 text = bb_escape_old_substitution_percents(text)
@@ -545,8 +1321,9 @@ init 20 python:
             pass
 
         try:
-            return renpy.substitutions.substitute(text, translate=False)[0]
-        except Exception:
+            rv = renpy.substitutions.substitute(text, translate=False)[0]
+            return rv
+        except Exception as e:
             return text
 
     bb_string_maps_ready = False
@@ -566,6 +1343,8 @@ init 20 python:
             bb_translated_to_original.clear()
         except Exception:
             pass
+
+        bb_reset_progress_event_title_cache()
 
     def bb_build_string_maps():
         global bb_string_maps_ready
@@ -825,13 +1604,15 @@ init 20 python:
         return tuple(values)
 
     def bb_dialogue_render_props(language=None, outlined=False, text=None):
+        font_alias = bb_language_for_text(language, text)
         props = {
             "style": "bb_dialogue",
             "substitute": False,
             "slow": False,
             "size": bb_dialogue_size(),
-            "font": bb_language_for_text(language, text),
+            "font": font_alias,
         }
+
 
         if outlined:
             props["color"] = "#fff"
@@ -905,6 +1686,7 @@ init 20 python:
             return (fallback_height, 0, 0)
 
         ruby_style = bb_ruby_style()
+        font_alias = bb_language_for_text(language, text)
         key = (
             text,
             language,
@@ -912,7 +1694,7 @@ init 20 python:
             int(gui.dialogue_width),
             int(config.screen_height),
             bb_dialogue_size(),
-            bb_language_for_text(language, text),
+            font_alias,
             bb_style_signature(ruby_style),
         )
 
@@ -938,7 +1720,7 @@ init 20 python:
                     bottom = max(0, int(math.ceil(getattr(layout, "add_bottom", 0) or 0)))
 
             rv = (height, top, bottom)
-        except Exception:
+        except Exception as e:
             rv = (fallback_height, 0, 0)
 
         if len(bb_dialogue_metrics_cache) > 512:
@@ -1419,6 +2201,7 @@ init 20 python:
         if bb_current_mode() == mode:
             bb_sync_engine_language()
             bb_capture_current_fonts()
+            bb_patch_progress_event_names()
             return
 
         persistent.bb_mode = mode
@@ -1427,6 +2210,7 @@ init 20 python:
 
         bb_sync_engine_language()
         bb_capture_current_fonts()
+        bb_patch_progress_event_names()
 
         try:
             renpy.loader.loadable_cache.clear()
@@ -1444,7 +2228,9 @@ init 20 python:
     def bb_start_callback():
         bb_init_persistent()
         bb_sync_engine_language()
+        bb_reset_progress_event_title_cache()
         bb_capture_current_fonts()
+        bb_patch_progress_event_names()
 
     def bb_after_load_callback():
         global bb_clear_say_ranges_next_interact
@@ -1456,6 +2242,7 @@ init 20 python:
         bb_reset_translated_font()
         bb_reset_text_maps()
         bb_capture_current_fonts()
+        bb_patch_progress_event_names()
 
     def bb_reapply_current_language_styles():
         try:
@@ -1467,6 +2254,7 @@ init 20 python:
     bb_capture_original_font()
     bb_sync_engine_language()
     bb_capture_current_fonts()
+    bb_patch_progress_event_names()
 
     bb_say._bb_base_say = bb_base_say
     renpy.exports.say = bb_say
@@ -1663,6 +2451,375 @@ screen bb_history():
 
         if not _history_list:
             label _("The dialogue history is empty.")
+
+screen bb_hinttracker():
+
+    tag menu
+
+    key "n" action Return()
+
+    $ activate_girls()
+    $ ProgressMod.update_all()
+    $ bb_rows = bb_progress_hint_rows()
+
+    use game_menu(_("Hints"), scroll="viewport"):
+
+        null
+
+    $ renpy.show_screen("overlay_scr", transient=False, zorder=100)
+
+    viewport:
+        xpos .25
+        ypos .14
+        xsize 1450
+        ysize 780
+        scrollbars None
+        mousewheel True
+        draggable True
+        pagekeys True
+
+        vbox:
+            spacing 0
+
+            for bb_row in bb_rows:
+                hbox:
+                    spacing 28
+
+                    fixed:
+                        xsize 170
+                        yfit True
+
+                        if bb_row["girl_screen"] == "amitrackerm2":
+                            textbutton _(bb_row["girl_label"]) action [ShowMenu("amitrackerm2"), SetVariable("showgirl", bb_row["showgirl_name"])] style "event_button" text_style bb_row["girl_text_style"]
+                        else:
+                            textbutton _(bb_row["girl_label"]) action ShowMenu(bb_row["girl_screen"]) style "event_button" text_style bb_row["girl_text_style"]
+
+                    fixed:
+                        xsize 580
+                        yfit True
+
+                        text (bb_row["event_title"]) style "hint_text" substitute False
+
+                    fixed:
+                        xsize 630
+                        yfit True
+
+                        if show_hints == True:
+                            if bb_row["hint_action"]:
+                                textbutton (bb_row["hint"]) action [ShowMenu("explanations"), SetVariable("explain_event", bb_row["event"]), SetVariable("previous_screen", "hints")] style "event_button" text_style "hint_text"
+                            else:
+                                text (bb_row["hint"]) style "hint_text"
+                        else:
+                            null
+
+    vbox:
+        xpos .25
+        ypos .916
+
+        hbox:
+            if dark_mode:
+                textbutton _("Back") action ShowMenu("progressmod_dark")
+            else:
+                textbutton _("Back") action ShowMenu("progressmod")
+
+screen bb_progress_tracker_rows(bb_rows, bb_ypos=.14, bb_ysize=780):
+
+    viewport:
+        xpos .25
+        ypos bb_ypos
+        xsize 1450
+        ysize bb_ysize
+        scrollbars None
+        mousewheel True
+        draggable True
+        pagekeys True
+
+        vbox:
+            spacing 0
+
+            for bb_row in bb_rows:
+                hbox:
+                    spacing 28
+
+                    fixed:
+                        xsize 650
+                        yfit True
+
+                        if bb_row["completed"]:
+                            textbutton (bb_row["title"]) action Replay(bb_row["event"].var_name, locked=False) style "event_button" text_style "modmybutton"
+                        else:
+                            text (bb_row["title"]) style "tracker_text" substitute False
+
+                    fixed:
+                        xsize 670
+                        yfit True
+
+                        if bb_row["hint"]:
+                            if bb_row["hint_action"]:
+                                textbutton (bb_row["hint"]) action [ShowMenu("explanations"), SetVariable("explain_event", bb_row["event"]), SetVariable("previous_screen", bb_row["previous_screen"])] style "event_button" text_style "mod"
+                            else:
+                                text (bb_row["hint"]) style "tracker_text"
+                        else:
+                            null
+
+screen bb_maintrackerch1m():
+    tag menu
+    key "m" action Return()
+    $ renpy.show_screen("overlay_scr", transient=False, zorder=100)
+    $ ProgressMod.update_all()
+    $ bb_rows = bb_progress_main_rows(1)
+
+    use game_menu(_("Chapter 1"), scroll="viewport"):
+        null
+
+    vbox:
+        xpos .25
+        ypos 75
+        hbox:
+            textbutton _("<") action ShowMenu(bb_progress_main_prev_screen(1))
+            textbutton _(">") action ShowMenu(bb_progress_main_next_screen(1))
+
+    use bb_progress_tracker_rows(bb_rows)
+
+    vbox:
+        xpos .25
+        ypos .916
+        hbox:
+            if dark_mode:
+                textbutton _("Back") action ShowMenu("progressmod_dark")
+            else:
+                textbutton _("Back") action ShowMenu("progressmod")
+            if show_hints:
+                textbutton _("       Hints") action ShowMenu("hinttracker")
+
+screen bb_maintrackerch2m():
+    tag menu
+    key "m" action Return()
+    $ renpy.show_screen("overlay_scr", transient=False, zorder=100)
+    $ ProgressMod.update_all()
+    $ bb_rows = bb_progress_main_rows(2)
+
+    use game_menu(_("Chapter 2"), scroll="viewport"):
+        null
+
+    vbox:
+        xpos .25
+        ypos 75
+        hbox:
+            textbutton _("<") action ShowMenu(bb_progress_main_prev_screen(2))
+            textbutton _(">") action ShowMenu(bb_progress_main_next_screen(2))
+
+    use bb_progress_tracker_rows(bb_rows)
+
+    vbox:
+        xpos .25
+        ypos .916
+        hbox:
+            if dark_mode:
+                textbutton _("Back") action ShowMenu("progressmod_dark")
+            else:
+                textbutton _("Back") action ShowMenu("progressmod")
+            if show_hints:
+                textbutton _("       Hints") action ShowMenu("hinttracker")
+
+screen bb_maintrackerch3m():
+    tag menu
+    key "m" action Return()
+    $ renpy.show_screen("overlay_scr", transient=False, zorder=100)
+    $ ProgressMod.update_all()
+    $ bb_rows = bb_progress_main_rows(3)
+
+    use game_menu(_("Chapter 3"), scroll="viewport"):
+        null
+
+    vbox:
+        xpos .25
+        ypos 75
+        hbox:
+            textbutton _("<") action ShowMenu(bb_progress_main_prev_screen(3))
+            textbutton _(">") action ShowMenu(bb_progress_main_next_screen(3))
+
+    use bb_progress_tracker_rows(bb_rows)
+
+    vbox:
+        xpos .25
+        ypos .916
+        hbox:
+            if dark_mode:
+                textbutton _("Back") action ShowMenu("progressmod_dark")
+            else:
+                textbutton _("Back") action ShowMenu("progressmod")
+            if show_hints:
+                textbutton _("       Hints") action ShowMenu("hinttracker")
+
+screen bb_maintrackerch4m():
+    tag menu
+    key "m" action Return()
+    $ renpy.show_screen("overlay_scr", transient=False, zorder=100)
+    $ ProgressMod.update_all()
+    $ bb_rows = bb_progress_main_rows(4)
+
+    use game_menu(_("Chapter 4"), scroll="viewport"):
+        null
+
+    vbox:
+        xpos .25
+        ypos 75
+        hbox:
+            textbutton _("<") action ShowMenu(bb_progress_main_prev_screen(4))
+            textbutton _(">") action ShowMenu(bb_progress_main_next_screen(4))
+
+    use bb_progress_tracker_rows(bb_rows)
+
+    vbox:
+        xpos .25
+        ypos .916
+        hbox:
+            if dark_mode:
+                textbutton _("Back") action ShowMenu("progressmod_dark")
+            else:
+                textbutton _("Back") action ShowMenu("progressmod")
+            if show_hints:
+                textbutton _("       Hints") action ShowMenu("hinttracker")
+
+screen bb_amitrackerm2():
+    tag menu
+    key "g" action Return()
+    $ renpy.show_screen("overlay_scr", transient=False, zorder=100)
+    $ activate_girls()
+    $ ProgressMod.update_all()
+    $ bb_rows = bb_progress_girl_rows()
+    $ bb_girl_rows = bb_progress_visible_girl_rows()
+
+    use game_menu(_("Girls"), scroll="viewport"):
+        null
+
+    vbox:
+        xpos .25
+        ypos 40
+        spacing 8
+
+        for bb_girl_row in bb_girl_rows:
+            hbox:
+                spacing 0
+
+                for bb_girl in bb_girl_row:
+                    $ bb_thumb = bb_progress_girl_thumbnail(bb_girl)
+                    $ bb_idle_thumb = bb_progress_girl_thumbnail_idle(bb_girl)
+
+                    if bb_thumb:
+                        imagebutton:
+                            idle bb_idle_thumb
+                            hover bb_thumb
+                            focus_mask True
+                            action [ShowMenu("amitrackerm2"), SetVariable("showgirl", bb_girl.name)]
+                            at customzoom
+                        text (" ")
+
+    vbox:
+        xpos .25
+        ypos 195
+        text (bb_progress_girl_header()) style "aff" substitute False
+
+    use bb_progress_tracker_rows(bb_rows, 245, 720)
+
+    vbox:
+        xpos .25
+        ypos .916
+        hbox:
+            if dark_mode:
+                textbutton _("Back") action ShowMenu("progressmod_dark")
+            else:
+                textbutton _("Back") action ShowMenu("progressmod")
+            if show_hints:
+                textbutton _("       Hints") action ShowMenu("hinttracker")
+
+screen bb_explanations():
+
+    tag menu
+
+    key "n" action Return()
+
+    $ explain_text = ""
+
+    use game_menu(_("Hints"), scroll="viewport"):
+
+        null
+
+    $ renpy.show_screen("overlay_scr", transient=False, zorder=100)
+
+    vbox:
+        xpos .25
+        ypos .14
+
+        text (explain_event.girl.colored_name + '      ' + explain_event.name) style "tracker_text"
+
+    vbox:
+        xpos .25
+        ypos .17
+        style_prefix "hint"
+
+        python:
+            import string
+
+            second_explain_text = ""
+            if explain_event.attention_type == 1:
+                explain_text = "Rejecting her will lead to missing events."
+            elif explain_event.attention_type == 2:
+                previous_event = eval("ev_" + explain_event.previous_event)
+                if previous_event.girl == MainEvent:
+                    previous_event = previous_event.var_name.rstrip(string.digits) + "1"
+                    previous_event = eval("ev_" + previous_event)
+                    explain_text = "You have until the " + previous_event.girl.colored_name + " " + previous_event.name + " to complete the lust requirement."
+                else:
+                    explain_text = "You have until the " + previous_event.girl.colored_name + " event " + previous_event.name + " to complete the lust requirement."
+                if explain_event.second_attention == 9:
+                    second_explain_text = "Choose " + Miku.colored_name + " as the winner of the costume contest."
+                elif explain_event.second_attention == 10:
+                    second_explain_text = "You have until the " + MainEvent.colored_name + " There is Nothing to complete the lust requirement."
+                elif explain_event.second_attention == 15:
+                    second_explain_text = "You will not be able to increase " + Makoto.colored_name + "'s lust after " + Nodoka.colored_name + "'s event Beyond the Reach of God."
+            elif explain_event.attention_type == 3:
+                explain_text = "Telling her the truth will cause you to miss a " + Karin.colored_name + " event."
+            elif explain_event.attention_type == 4:
+                explain_text = "Starting this event before you have completed the beach vacation will impact " + Rin.colored_name + "'s events."
+            elif explain_event.attention_type == 5:
+                explain_text = "Starting this event before you have completed the " + Yumi.colored_name + " event Abyss will impact " + Yumi.colored_name + "'s events."
+            elif explain_event.attention_type == 6:
+                explain_text = "Not asking for a blowjob will cause you to miss a later " + Maki.colored_name + " event."
+            elif explain_event.attention_type == 7:
+                explain_text = "Leaving " + Sana.colored_name + " will cause you to miss an event."
+            elif explain_event.attention_type == 8:
+                explain_text = "Choosing " + Ayane.colored_name + " is a requirement for future events."
+            elif explain_event.attention_type == 11:
+                explain_text = "Choosing " + Tsukasa.colored_name + " is a requirement for future events."
+            elif explain_event.attention_type == 12:
+                explain_text = "Not sending the photo will lead to missing significant content but full consequences are still unknown."
+            elif explain_event.attention_type == 13:
+                explain_text = "Choose to go in to avoid missing future " + Tsukasa.colored_name + " events."
+            elif explain_event.attention_type == 14:
+                explain_text = "Need to view the picture in Sana's profile to get her number."
+
+        if not "correct choices" in explain_event.hint:
+            text ('     ' + explain_text)
+        if not second_explain_text == "":
+            text ('     ' + second_explain_text)
+
+    vbox:
+        xpos .25
+        ypos .916
+        hbox:
+            if previous_screen == "hints":
+                textbutton _("Back") action ShowMenu("hinttracker")
+            elif previous_screen == "girls":
+                textbutton _("Back") action ShowMenu("amitrackerm2")
+            elif previous_screen in ("maintrackerch1m", "maintrackerch2m", "maintrackerch3m", "maintrackerch4m"):
+                textbutton _("Back") action ShowMenu(previous_screen)
+            else:
+                if dark_mode:
+                    textbutton _("Back") action ShowMenu("progressmod_dark")
+                else:
+                    textbutton _("Back") action ShowMenu("progressmod")
 
 style bb_dialogue is say_dialogue:
     xpos 0
@@ -2012,6 +3169,17 @@ init 999 python:
             except ValueError:
                 pass
 
+    def bb_sl_walk_nodes(node):
+        if node is None:
+            return
+
+        yield node
+
+        for children in bb_sl_child_lists(node):
+            for child in list(children):
+                for grandchild in bb_sl_walk_nodes(child):
+                    yield grandchild
+
     def bb_install_screen_alias(public_name, private_name, tag=None):
         try:
             variants = renpy.display.screen.get_all_screen_variants(private_name)
@@ -2055,6 +3223,13 @@ init 999 python:
 
     bb_install_screen_alias("say", "bb_say")
     bb_install_screen_alias("history", "bb_history", "menu")
+    bb_install_screen_alias("hinttracker", "bb_hinttracker", "menu")
+    bb_install_screen_alias("explanations", "bb_explanations", "menu")
+    bb_install_screen_alias("maintrackerch1m", "bb_maintrackerch1m", "menu")
+    bb_install_screen_alias("maintrackerch2m", "bb_maintrackerch2m", "menu")
+    bb_install_screen_alias("maintrackerch3m", "bb_maintrackerch3m", "menu")
+    bb_install_screen_alias("maintrackerch4m", "bb_maintrackerch4m", "menu")
+    bb_install_screen_alias("amitrackerm2", "bb_amitrackerm2", "menu")
     bb_patch_quick_menu_language_fragment(log_failure=False)
     bb_patch_preferences_language_fragment(log_failure=False)
     if bb_patch_quick_menu_language_fragment_interact not in config.start_interact_callbacks:
