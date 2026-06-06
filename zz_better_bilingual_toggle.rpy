@@ -2238,8 +2238,10 @@ init 20 python:
         bb_clear_say_ranges_next_interact = False
         bb_init_persistent()
         bb_sync_engine_language()
-        bb_reapply_current_language_styles()
-        bb_reset_translated_font()
+        if bb_reapply_current_language_styles():
+            bb_reset_translated_font()
+        else:
+            bb_log("kept translated font cache after failed language style reapply")
         bb_reset_text_maps()
         bb_capture_current_fonts()
         bb_patch_progress_event_names()
@@ -2247,8 +2249,16 @@ init 20 python:
     def bb_reapply_current_language_styles():
         try:
             renpy.translation.change_language(BB_TRANSLATED_LANGUAGE, force=True, rebuild=True)
+            return True
+        except TypeError as e:
+            try:
+                renpy.translation.change_language(BB_TRANSLATED_LANGUAGE, force=True)
+                return True
+            except Exception as fallback_e:
+                bb_log("could not reapply language styles after load: %r; fallback failed: %r" % (e, fallback_e))
         except Exception as e:
             bb_log("could not reapply language styles after load: %r" % e)
+        return False
 
     bb_init_persistent()
     bb_capture_original_font()
