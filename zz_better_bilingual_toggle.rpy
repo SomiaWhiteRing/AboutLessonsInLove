@@ -1813,45 +1813,53 @@ init 20 python:
             pass
 
     def bb_sync_second_slow(event, **kwargs):
-        if event != "show_done" or not bb_is_bilingual_mode():
+        if event != "show_done":
             return
 
         try:
             first = renpy.display.screen.get_widget("say", "what", renpy.config.say_layer)
-            second = renpy.display.screen.get_widget("say", "bb_second_what", renpy.config.say_layer)
+            overlays = [
+                renpy.display.screen.get_widget("say", "bb_primary_what", renpy.config.say_layer),
+                renpy.display.screen.get_widget("say", "bb_second_what", renpy.config.say_layer),
+            ]
         except Exception:
             return
 
-        if first is None or second is None:
+        overlays = [text for text in overlays if text is not None]
+        if first is None or not overlays:
             return
 
         if not getattr(first, "slow", False):
-            bb_finish_slow_text(second)
+            for text in overlays:
+                bb_finish_slow_text(text)
             return
 
         first_cps = bb_effective_cps(first)
         if first_cps <= 0:
-            bb_finish_slow_text(second)
+            for text in overlays:
+                bb_finish_slow_text(text)
             return
 
         target_time = float(bb_slow_count(first)) / first_cps
         if target_time <= 0:
-            bb_finish_slow_text(second)
+            for text in overlays:
+                bb_finish_slow_text(text)
             return
 
-        second_cps = max(0.01, float(bb_slow_count(second)) / target_time)
-        bb_set_text_cps(second, second_cps)
+        for text in overlays:
+            text_cps = max(0.01, float(bb_slow_count(text)) / target_time)
+            bb_set_text_cps(text, text_cps)
 
-        try:
-            second.start = None
-            second.end = None
-            second.slow = True
-            second.slow_done = None
-            second.slow_done_time = None
-            second.update()
-            renpy.display.render.redraw(second, 0)
-        except Exception:
-            pass
+            try:
+                text.start = None
+                text.end = None
+                text.slow = True
+                text.slow_done = None
+                text.slow_done_time = None
+                text.update()
+                renpy.display.render.redraw(text, 0)
+            except Exception:
+                pass
 
     if bb_sync_second_slow not in config.all_character_callbacks:
         config.all_character_callbacks.append(bb_sync_second_slow)
@@ -2103,7 +2111,7 @@ init 20 python:
 
     def bb_clear_current_say_ranges():
         try:
-            for widget_id in ("what", "bb_second_what"):
+            for widget_id in ("what", "bb_primary_what", "bb_second_what"):
                 text_widget = renpy.display.screen.get_widget(
                     "say",
                     widget_id,
@@ -2308,6 +2316,7 @@ screen bb_say(who, what, bb_force_bilingual_window=False):
     $ bb_pair = bb_text_pair(what) if bb_has_text else [(BB_MODE_TRANSLATED, what)]
     $ bb_current_language = bb_pair[0][0] if bb_pair else BB_MODE_TRANSLATED
     $ bb_current_what = bb_pair[0][1] if bb_pair else what
+    $ bb_current_what_matches_engine = bb_current_what == what
     $ bb_second_what = bb_pair[1][1] if len(bb_pair) > 1 and bb_pair[1][1] != bb_current_what else None
     $ bb_second_language = bb_pair[1][0] if len(bb_pair) > 1 else None
     $ bb_bilingual = bb_has_text and bb_is_bilingual_mode()
@@ -2354,17 +2363,33 @@ screen bb_say(who, what, bb_force_bilingual_window=False):
                     xsize gui.dialogue_width
                     ysize (bb_slot_height + bb_top_pad + bb_bottom_pad)
 
-                    text bb_current_what id "what":
+                    text what id "what":
                         prefer_screen_to_id True
                         style "bb_dialogue"
                         substitute False
                         ypos bb_top_pad
-                        font bb_language_for_text(bb_current_language, bb_current_what)
+                        font bb_language_for_text(bb_current_language, what)
                         ruby_style bb_ruby_style()
                         size bb_dialogue_size()
-                        if bb_opacity <= 0.5:
+                        if not bb_current_what_matches_engine:
+                            color "#00000000"
+                            outlines []
+                        elif bb_opacity <= 0.5:
                             color "#fff"
                             outlines [(absolute(1), "#242424", absolute(1), absolute(1))]
+
+                    if not bb_current_what_matches_engine:
+                        text bb_current_what id "bb_primary_what":
+                            style "bb_dialogue"
+                            substitute False
+                            slow True
+                            ypos bb_top_pad
+                            font bb_language_for_text(bb_current_language, bb_current_what)
+                            ruby_style bb_ruby_style()
+                            size bb_dialogue_size()
+                            if bb_opacity <= 0.5:
+                                color "#fff"
+                                outlines [(absolute(1), "#242424", absolute(1), absolute(1))]
 
                 fixed:
                     xsize gui.dialogue_width
@@ -2389,10 +2414,25 @@ screen bb_say(who, what, bb_force_bilingual_window=False):
                         null height bb_slot_height
 
         else:
-            if bb_opacity <= 0.5:
-                text bb_current_what id "what" substitute False font bb_language_for_text(bb_current_language, bb_current_what) color "#fff" outlines [(absolute(1), "#242424", absolute(1), absolute(1))] ruby_style bb_ruby_style() size persistent.dialogue_text_size
-            else:
-                text bb_current_what id "what" substitute False font bb_language_for_text(bb_current_language, bb_current_what) size persistent.dialogue_text_size
+            text what id "what" substitute False font bb_language_for_text(bb_current_language, what) ruby_style bb_ruby_style() size persistent.dialogue_text_size:
+                if not bb_current_what_matches_engine:
+                    color "#00000000"
+                    outlines []
+                elif bb_opacity <= 0.5:
+                    color "#fff"
+                    outlines [(absolute(1), "#242424", absolute(1), absolute(1))]
+
+            if not bb_current_what_matches_engine:
+                text bb_current_what id "bb_primary_what":
+                    style "say_dialogue"
+                    substitute False
+                    slow True
+                    font bb_language_for_text(bb_current_language, bb_current_what)
+                    ruby_style bb_ruby_style()
+                    size persistent.dialogue_text_size
+                    if bb_opacity <= 0.5:
+                        color "#fff"
+                        outlines [(absolute(1), "#242424", absolute(1), absolute(1))]
 
     if not renpy.variant("small"):
         add SideImage() xalign 0.0 yalign 1.0

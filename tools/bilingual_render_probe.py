@@ -42,6 +42,12 @@ init 999999 python:
         except Exception:
             return 0
 
+    def _bb_probe_say_screen_identity_limit():
+        try:
+            return int(os.environ.get("BB_RENDER_PROBE_SAY_SCREEN_IDENTITY_LIMIT", "64") or "0")
+        except Exception:
+            return 64
+
     def _bb_probe_truthy_env(name):
         return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -390,6 +396,84 @@ init 999999 python:
 
         return displayable
 
+    def _bb_probe_check_say_screen_identity(entry, mode):
+        identifier = entry.get("identifier")
+        if not identifier:
+            return
+
+        candidates = []
+
+        try:
+            filtered = _bb_probe_check_say_substitution(_bb_probe_say_substitution_input(entry))
+            if filtered is not None:
+                candidates.append(filtered)
+        except Exception:
+            pass
+
+        raw = entry.get("translated")
+        if raw is None:
+            raw = entry.get("original")
+        raw = _bb_probe_substitute(raw)
+        if raw is not None and raw not in candidates:
+            candidates.append(raw)
+
+        if not candidates:
+            return
+
+        missing = object()
+        old_current_identifier = globals().get("bb_current_identifier", missing)
+        old_mode = getattr(persistent, "bb_mode", None)
+        globals()["bb_current_identifier"] = lambda: identifier
+        _bb_probe_set_mode(mode)
+
+        try:
+            for engine_text in candidates:
+                try:
+                    renpy.display.screen.hide_screen("say", config.say_layer, immediately=True)
+                except Exception:
+                    pass
+
+                renpy.display.screen.show_screen(
+                    "say",
+                    _tag="say",
+                    _layer=config.say_layer,
+                    _transient=True,
+                    who=None,
+                    what=engine_text,
+                )
+                what_widget = renpy.display.screen.get_widget("say", "what", config.say_layer)
+                if what_widget is None:
+                    raise Exception("say screen did not create a widget with id 'what'.")
+                if not isinstance(what_widget, renpy.text.text.Text):
+                    raise Exception("say screen id 'what' is not a Text object.")
+
+                try:
+                    actual = what_widget.text[0]
+                except Exception:
+                    actual = None
+
+                if actual != engine_text:
+                    raise Exception(
+                        "say screen id 'what' mismatch in %s mode: expected %r, got %r"
+                        % (mode, engine_text, actual)
+                    )
+        finally:
+            try:
+                renpy.display.screen.hide_screen("say", config.say_layer, immediately=True)
+            except Exception:
+                pass
+
+            if old_mode is not None:
+                _bb_probe_set_mode(old_mode)
+
+            if old_current_identifier is missing:
+                try:
+                    del globals()["bb_current_identifier"]
+                except Exception:
+                    pass
+            else:
+                globals()["bb_current_identifier"] = old_current_identifier
+
     def _bb_probe_collect_dialogue_entries(language):
         rv = []
         try:
@@ -542,6 +626,8 @@ init 999999 python:
         stats = collections.Counter()
         failures = 0
         checked = 0
+        say_screen_identity_limit = _bb_probe_say_screen_identity_limit()
+        say_screen_identity_counts = collections.Counter()
 
         with open(output, "w", encoding="utf-8") as handle:
             _bb_probe_write_jsonl(handle, {
@@ -619,6 +705,29 @@ init 999999 python:
                                     "text": _bb_probe_short(line_text),
                                     "props": { k: repr(v) for k, v in props.items() },
                                     "error": _bb_probe_exception("screen_text_object", exc),
+                                })
+
+                        if (
+                            case_name == "say_screen_text"
+                            and entry.get("kind") == "dialogue"
+                            and say_screen_identity_counts[mode] < say_screen_identity_limit
+                            and entry.get("original") != entry.get("translated")
+                        ):
+                            say_screen_identity_counts[mode] += 1
+                            checked += 1
+                            stats["case.say_screen_identity"] += 1
+                            try:
+                                _bb_probe_check_say_screen_identity(entry, mode)
+                            except Exception as exc:
+                                failures += 1
+                                _bb_probe_write_jsonl(handle, {
+                                    "type": "failure",
+                                    "mode": mode,
+                                    "case": case_name,
+                                    "stage": "say_screen_identity",
+                                    "entry": entry,
+                                    "text": _bb_probe_short(entry.get("translated") or entry.get("original")),
+                                    "error": _bb_probe_exception("say_screen_identity", exc),
                                 })
 
                         if substitution_input is not None:
