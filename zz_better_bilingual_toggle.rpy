@@ -311,6 +311,15 @@ init 20 python:
 
         return rv
 
+    def bb_escape_new_substitution_brackets(text):
+        if not getattr(config, "new_substitutions", True):
+            return text
+
+        if not isinstance(text, str) or "[" not in text:
+            return text
+
+        return text.replace("[", "[[")
+
     def bb_say(who, what, *args, **kwargs):
 
         if getattr(config, "old_substitutions", False):
@@ -1452,6 +1461,9 @@ init 20 python:
             return pair[0][1]
         return text
 
+    def bb_primary_say_text(text, identifier=None):
+        return bb_escape_new_substitution_brackets(bb_primary_text(text, identifier))
+
     def bb_statement_is_menu():
         try:
             return renpy.get_statement_name().startswith("menu")
@@ -1468,9 +1480,9 @@ init 20 python:
             return text
 
         if bb_statement_is_menu():
-            return bb_join_pair(bb_text_pair(text, ""), with_fonts=True)
+            return bb_escape_new_substitution_brackets(bb_join_pair(bb_text_pair(text, ""), with_fonts=True))
 
-        return bb_primary_text(text)
+        return bb_primary_say_text(text)
 
     config.say_menu_text_filter = bb_say_menu_text_filter
 
